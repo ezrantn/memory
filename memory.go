@@ -2,6 +2,7 @@ package memory
 
 import (
 	"errors"
+	"sort"
 	"sync"
 )
 
@@ -33,26 +34,36 @@ func (mm *Memory) Alloc(size int) (int, error) {
 	mm.mu.Lock()
 	defer mm.mu.Unlock()
 
-	for i, freeBlock := range mm.freeBlocks {
-		if freeBlock.size >= size {
-			start := freeBlock.start
-			mm.allocated[start] = size
+	// Find best-fit block
+	bestFitIdx := -1
+	bestFitSize := PoolSize + 1
 
-			// Update the free block
-			if freeBlock.size > size {
-				mm.freeBlocks[i] = block{
-					start: start + size,
-					size:  freeBlock.size - size,
-				}
-			} else {
-				mm.freeBlocks = append(mm.freeBlocks[:i], mm.freeBlocks[i+1:]...)
-			}
-
-			return start, nil
+	for i, block := range mm.freeBlocks {
+		if block.size >= size && block.size < bestFitSize {
+			bestFitIdx = i
+			bestFitSize = block.size
 		}
 	}
 
-	return -1, errors.New("out of memory")
+	if bestFitIdx == -1 {
+		return -1, errors.New("out of memory")
+	}
+
+	freeBlock := mm.freeBlocks[bestFitIdx]
+	start := freeBlock.start
+	mm.allocated[start] = size
+
+	// Update or remove the free block
+	if freeBlock.size > size {
+		mm.freeBlocks[bestFitIdx] = block{
+			start: start + size,
+			size:  freeBlock.size - size,
+		}
+	} else {
+		mm.freeBlocks = append(mm.freeBlocks[:bestFitIdx], mm.freeBlocks[bestFitIdx+1:]...)
+	}
+
+	return start, nil
 }
 
 // Simulate malloc: Allocate and zero-initialize memory
@@ -88,5 +99,63 @@ func (mm *Memory) Free(addr int) error {
 
 // Merge adjacent free blocks to reduce fragmentation
 func (mm *Memory) coalesceFreeBlock() {
+	if len(mm.freeBlocks) <= 1 {
+		return
+	}
 
+	// Sort blocks by start address
+	sort.Slice(mm.freeBlocks, func(i, j int) bool {
+		return mm.freeBlocks[i].start < mm.freeBlocks[j].start
+	})
+
+	// Merge adjacent blocks
+	newBlocks := []block{mm.freeBlocks[0]}
+	for i := 1; i < len(mm.freeBlocks); i++ {
+		curr := mm.freeBlocks[i]
+		prev := &newBlocks[len(newBlocks)-1]
+
+		if prev.start+prev.size == curr.start {
+			// Merge blocks
+			prev.size += curr.size
+		} else {
+			newBlocks = append(newBlocks, curr)
+		}
+	}
+
+	mm.freeBlocks = newBlocks
+}
+
+func (mm *Memory) Read(addr, size int) ([]byte, error) {
+	mm.mu.RLock()
+	defer mm.mu.RUnlock()
+
+	allocSize, exists := mm.allocated[addr]
+	if !exists {
+		return nil, errors.New("reading from unallocated memory")
+	}
+
+	if size > allocSize {
+		return nil, errors.New("reading beyond allocated memory")
+	}
+
+	result := make([]byte, size)
+	copy(result, mm.memoryPool[addr:addr+size])
+	return result, nil
+}
+
+func (mm *Memory) Write(addr int, data []byte) error {
+	mm.mu.Lock()
+	defer mm.mu.Unlock()
+
+	allocSize, exists := mm.allocated[addr]
+	if !exists {
+		return errors.New("writing to unallocated memory")
+	}
+
+	if len(data) > allocSize {
+		return errors.New("writing beyond allocated memory")
+	}
+
+	copy(mm.memoryPool[addr:addr+len(data)], data)
+	return nil
 }
